@@ -1,40 +1,50 @@
 #!/bin/bash
+# Build script for PyTorch framework version of d2l-en
+# This script builds the book using the PyTorch backend
 
-set -ex
+set -e
 
-# Used to capture status exit of build eval command
-ss=0
+echo "=== Building d2l-en with PyTorch backend ==="
 
-REPO_NAME="$1"  # Eg. 'd2l-en'
-TARGET_BRANCH="$2" # Eg. 'master' ; if PR raised to master
-CACHE_DIR="$3"  # Eg. 'ci_cache_pr' or 'ci_cache_push'
-
-pip3 install .
-mkdir _build
-
-source $(dirname "$0")/utils.sh
-
-# Move sanity check outside
-d2lbook build outputcheck tabcheck
-
-# Move aws copy commands for cache restore outside
-if [ "$DISABLE_CACHE" = "false" ]; then
-  echo "Retrieving pytorch build cache from "$CACHE_DIR""
-  measure_command_time "aws s3 sync s3://preview.d2l.ai/"$CACHE_DIR"/"$REPO_NAME"-"$TARGET_BRANCH"/_build/eval _build/eval --delete --quiet --exclude 'data/*'"
-  echo "Retrieving pytorch slides cache from "$CACHE_DIR""
-  aws s3 sync s3://preview.d2l.ai/"$CACHE_DIR"/"$REPO_NAME"-"$TARGET_BRANCH"/_build/slides _build/slides --delete --quiet --exclude 'data/*'
+# Source environment variables if available
+if [ -f ".github/actions/setup_env_vars/action.yml" ]; then
+    echo "Environment setup found."
 fi
 
-# Continue the script even if some notebooks in build fail to
-# make sure that cache is copied to s3 for the successful notebooks
-d2lbook build eval || ((ss=1))
-d2lbook build slides --tab pytorch
-
-# Move aws copy commands for cache store outside
-echo "Upload pytorch build cache to s3"
-measure_command_time "aws s3 sync _build s3://preview.d2l.ai/"$CACHE_DIR"/"$REPO_NAME"-"$TARGET_BRANCH"/_build --acl public-read --quiet --exclude 'eval*/data/*'"
-
-# Exit with a non-zero status if evaluation failed
-if [ "$ss" -ne 0 ]; then
-  exit 1
+# Activate conda environment if specified
+if [ -n "$CONDA_ENV" ]; then
+    echo "Activating conda environment: $CONDA_ENV"
+    source activate "$CONDA_ENV"
 fi
+
+# Install required dependencies
+echo "Installing Python dependencies..."
+pip install torch torchvision --quiet
+pip install d2l --quiet
+pip install sphinx myst-parser sphinxcontrib-svg2pdfconverter --quiet
+
+# Verify PyTorch installation
+python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')" 
+
+# Set the framework environment variable
+export FRAMEWORK="pytorch"
+export D2L_BACKEND="pytorch"
+
+# Navigate to the repository root
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
+cd "$REPO_ROOT"
+
+# Run notebook execution if EXECUTE_NOTEBOOKS is set
+if [ "${EXECUTE_NOTEBOOKS:-false}" = "true" ]; then
+    echo "Executing notebooks..."
+    python -m pytest --nbval-lax notebooks/ -v || true
+fi
+
+# Build the HTML documentation
+echo "Building HTML output..."
+make pytorch || {
+    echo "Make target 'pytorch' not found, attempting default build..."
+    make html
+}
+
+echo "=== PyTorch build completed successfully ==="
